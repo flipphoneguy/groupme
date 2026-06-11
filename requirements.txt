@@ -1,0 +1,7 @@
+flask
+requests
+python-dotenv
+yfinance
+deep-translator
+pyspellchecker
+gunicorn
