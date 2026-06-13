@@ -6,6 +6,8 @@ The main reason it exists is to give SMS-only members access to things that othe
 
 None of the data sources need an API key. Weather comes from open-meteo, zmanim from Hebcal, stocks/crypto/currency from Yahoo Finance via `yfinance`, definitions from the free Dictionary API, and translation from Google Translate via `deep-translator`.
 
+> **No server?** [@jayjaytech](https://github.com/jayjaytech) ported this bot to [Google Apps Script](https://github.com/jayjaytech/Groupme-flipphoneguy), so you can run it without hosting anything yourself.
+
 ## Commands
 
 Commands are not case-sensitive. `[bracketed]` parts are values you supply; where there's a default it's noted below.
