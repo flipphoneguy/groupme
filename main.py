@@ -1,5 +1,7 @@
 import os
 import json
+import time
+import threading
 from datetime import datetime
 
 import requests
@@ -19,6 +21,9 @@ AUTH_CODE = os.getenv("AUTH_CODE", "")
 # Copilot is a built-in GroupMe assistant account with the same user ID in every group.
 COPILOT_UID = "128934125"
 
+# Tokens tried in order for read-only lookups (e.g. -list), since not every account is in every group.
+READ_TOKENS = [t for t in (ADMIN_TOKEN, FALLBACK_TOKEN) if t]
+
 # group_id -> bot_id, loaded from config.json (see config.example.json)
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 try:
@@ -30,6 +35,7 @@ except (FileNotFoundError, json.JSONDecodeError):
 HELP = """
 commands are not case-sensitive.
 Chat (Copilot): +[Your question](ex: + tell me a joke)
+Roster of this group: -list
 Translate: -translate [lang code] [text](ex: -translate es hello)
 == Weather & Zmanim ==
 (Location defaults to Jerusalem if not provided)
@@ -47,12 +53,12 @@ credits: @flipphoneguy
 """
 
 ADMIN_HELP = (
-    "Admin commands:\n"
-    "-@ <group id or .> <name> [message]  — @mention a member (. = current group)\n"
-    "-add <group id or .> <nickname> <phone>  — add a member\n"
-    "-remove <group id or .> <name or id>  — remove a member\n"
+    "Admin commands (group is the LAST arg; . = current group):\n"
+    "-@ <group id or .> <name> [message]  — @mention a member\n"
+    "-add <nickname> <phone> [group id or .]  — add a member\n"
+    "-remove <name or id> [group id or .]  — remove a member\n"
     "-groups  — list your groups\n"
-    "-members <name/phone/id>  — list a group's members"
+    "-members [group name/phone/id]  — detailed member list (defaults to this group)"
 )
 
 app = Flask(__name__)
@@ -66,11 +72,39 @@ def bot_send(bot_id, message):
                   json={"bot_id": bot_id, "text": message})
 
 
-def user_send(token, group, message, mention=True):
-    """Send a message to a group as a real user (via their token).
+# GroupMe doesn't deliver Copilot's messages to bot callbacks, so after mentioning Copilot we poll the group for its reply (~2-3s later) and echo it via the bot, so SMS users see the text. In-app users see it twice.
+COPILOT_FIRST_DELAY = 2.0
+COPILOT_POLL_INTERVAL = 0.7
+COPILOT_POLL_DEADLINE = 12   # seconds
 
-    Used for things SMS users can't do: @mentions and triggering Copilot.
-    Returns None on success, or an error string on failure.
+
+def schedule_copilot_echo(token, group_id, bot_id, since_id):
+    if not (token and bot_id and since_id):
+        return
+    deadline = time.time() + COPILOT_POLL_DEADLINE
+    threading.Timer(COPILOT_FIRST_DELAY, _poll_copilot_echo,
+                    args=(token, group_id, bot_id, since_id, deadline)).start()
+
+
+def _poll_copilot_echo(token, group_id, bot_id, since_id, deadline):
+    try:
+        r = requests.get(f"https://api.groupme.com/v3/groups/{group_id}/messages",
+                         params={"token": token, "since_id": since_id, "limit": 20})
+        msgs = r.json().get("response", {}).get("messages", []) if r.ok else []
+        cop = sorted([m for m in msgs if m.get("user_id") == COPILOT_UID], key=lambda m: m["created_at"])
+        if cop:
+            bot_send(bot_id, cop[0].get("text"))
+            return
+    except Exception:
+        pass
+    if time.time() < deadline:
+        threading.Timer(COPILOT_POLL_INTERVAL, _poll_copilot_echo,
+                        args=(token, group_id, bot_id, since_id, deadline)).start()
+
+
+def user_send(token, group, message, mention=True):
+    """Send to a group as a real user (for @mentions / Copilot).
+    Returns (message_id, error): id on success, error string on failure.
     """
     url = f"https://api.groupme.com/v3/groups/{group}/messages?token={token}"
     if mention:
@@ -80,7 +114,7 @@ def user_send(token, group, message, mention=True):
         else:
             resp = requests.get(f"https://api.groupme.com/v3/groups/{group}?token={token}")
             if not resp.ok:
-                return f"couldn't fetch members.\n{resp.status_code} {resp.text}"
+                return None, f"couldn't fetch members.\n{resp.status_code} {resp.text}"
             members = resp.json()["response"]["members"]
             if name == "all":
                 uids = [m["user_id"] for m in members]
@@ -93,7 +127,7 @@ def user_send(token, group, message, mention=True):
                         message = f"{name} {' '.join(message.split()[1:])}"
                         break
                 if not uids:
-                    return f"couldn't find user '{name}'"
+                    return None, f"couldn't find user '{name}'"
         loci = [[0, len(name) + 1] for _ in uids]
         data = {"message": {"source_guid": str(datetime.now().timestamp()),
                             "text": f"@{message}",
@@ -102,25 +136,30 @@ def user_send(token, group, message, mention=True):
         data = {"message": {"source_guid": str(datetime.now().timestamp()), "text": message}}
     resp = requests.post(url, json=data)
     if not resp.ok:
-        return f"couldn't send message.\n{resp.status_code} {resp.text}"
-    return None
+        return None, f"couldn't send message.\n{resp.status_code} {resp.text}"
+    try:
+        return resp.json()["response"]["message"]["id"], None
+    except Exception:
+        return None, None
 
 
 def add_member(token, group, nickname, number):
-    """Add a member by phone number. Numbers without a country code default to +1."""
+    """Add a member by phone (defaults to +1). Returns an error string, or None on success."""
     phone = number if number.startswith("+") else f"+1{number}"
     resp = requests.post(
         f"https://api.groupme.com/v3/groups/{group}/members/add?token={token}",
         json={"members": [{"nickname": nickname, "phone_number": phone}]})
     if not resp.ok:
         return f"failed to add {nickname} ({phone})\n{resp.status_code} {resp.text}"
-    return f"added {nickname}"
 
 
 def remove_member(token, group, name_or_id):
+    """Remove a member by nickname or user id. Returns an error string, or None on success."""
+    resp = requests.get(f"https://api.groupme.com/v3/groups/{group}?token={token}")
+    if not resp.ok:
+        return f"couldn't fetch group {group}\n{resp.status_code} {resp.text}"
     mid = None
-    members = requests.get(f"https://api.groupme.com/v3/groups/{group}?token={token}").json()["response"]["members"]
-    for m in members:
+    for m in resp.json()["response"]["members"]:
         if name_or_id in (m["nickname"], m["user_id"]):
             mid = m["id"]
             break
@@ -129,7 +168,6 @@ def remove_member(token, group, name_or_id):
     resp = requests.post(f"https://api.groupme.com/v3/groups/{group}/members/{mid}/remove?token={token}")
     if not resp.ok:
         return f"error removing '{name_or_id}'\n{resp.status_code} {resp.text}"
-    return f"removed {name_or_id}"
 
 
 def fetch_groups(token):
@@ -158,42 +196,77 @@ def fetch_members(token, query):
     return members
 
 
+def list_members(group):
+    """Plain roster: group name, then nicknames with (admin)/(muted) tags. Tries each token; None if unreadable."""
+    g = None
+    for token in READ_TOKENS:
+        resp = requests.get(f"https://api.groupme.com/v3/groups/{group}?token={token}")
+        if resp.ok:
+            g = resp.json()["response"]
+            break
+    if not g:
+        return None
+    lines = [g["name"], ""]
+    for m in g["members"]:
+        tags = []
+        if any(r in ("admin", "owner") for r in m.get("roles", [])):
+            tags.append("admin")
+        if m.get("muted"):
+            tags.append("muted")
+        tag = f" ({', '.join(tags)})" if tags else ""
+        lines.append(f"{m['nickname']}{tag}")
+    return "\n".join(lines)
+
+
 def handle_admin(text, group_id):
-    """Run an admin command. Returns a result string, or None if not an admin command."""
+    """Run an admin command. Returns a result/error string to post, or None (nothing to say)."""
     parts = text.split()
     cmd = parts[0].lower()
 
     if text.startswith("-@"):
         if len(parts) < 2:
             return "usage: -@<group id or .> <name> [message]"
-        group = group_id if parts[0][2:] == "." else parts[0][2:]
-        return user_send(ADMIN_TOKEN, group, " ".join(parts[1:]))
+        group = group_id if parts[0][2:] in ("", ".") else parts[0][2:]
+        _, err = user_send(ADMIN_TOKEN, group, " ".join(parts[1:]))
+        return err
     elif cmd == "-add":
-        if len(parts) < 4:
-            return "usage: -add <group id or .> <nickname> <phone>"
-        group = group_id if parts[1] == "." else parts[1]
-        return add_member(ADMIN_TOKEN, group, parts[2], parts[3])
-    elif cmd == "-remove":
+        # Group is the LAST arg (. = current); a multi-word nickname thus needs an explicit trailing group.
         if len(parts) < 3:
-            return "usage: -remove <group id or .> <name or id>"
-        group = group_id if parts[1] == "." else parts[1]
-        return remove_member(ADMIN_TOKEN, group, parts[2])
+            return "usage: -add <nickname> <phone> [group id or .]"
+        if len(parts) == 3:
+            nickname, phone, group = parts[1], parts[2], group_id
+        else:
+            group = group_id if parts[-1] == "." else parts[-1]
+            phone, nickname = parts[-2], " ".join(parts[1:-2])
+        return add_member(ADMIN_TOKEN, group, nickname, phone)
+    elif cmd == "-remove":
+        # Group is the LAST arg (. = current); a multi-word name thus needs an explicit trailing group.
+        if len(parts) < 2:
+            return "usage: -remove <name or id> [group id or .]"
+        if len(parts) == 2:
+            name, group = parts[1], group_id
+        else:
+            group = group_id if parts[-1] == "." else parts[-1]
+            name = " ".join(parts[1:-1])
+        return remove_member(ADMIN_TOKEN, group, name)
     elif cmd == "-groups":
         return fetch_groups(ADMIN_TOKEN)
     elif cmd == "-members":
-        if len(parts) < 2:
-            return "usage: -members <name/phone/id>"
-        return fetch_members(ADMIN_TOKEN, parts[1])
+        # -members [group name/phone/id]   Defaults to the current group.
+        query = parts[1] if len(parts) > 1 and parts[1] != "." else group_id
+        return fetch_members(ADMIN_TOKEN, query)
     elif cmd == "--help":
         return ADMIN_HELP
     return None
 
 
-def handle_command(text):
-    """Run a utility command. Returns a result string, or None if no command matched."""
+def handle_command(text, group_id):
+    """Run a command available to everyone. Returns a result string, or None if nothing matched."""
     low = text.lower()
     if low.startswith("-help"):
         return HELP
+    elif low.startswith("-list"):
+        return list_members(group_id) or "couldn't fetch member list."
     elif low.startswith("-currency"):
         return currency(*text.split()[1:])
     elif low.startswith("-weather"):
@@ -221,14 +294,17 @@ def calculate_response(text, sender_id, group_id, route):
     if text.startswith("+") and route != "general":
         token = ADMIN_TOKEN if sender_id == ADMIN_UID else (FALLBACK_TOKEN or ADMIN_TOKEN)
         if token:
-            result = user_send(token, group_id, f"Copilot {text[1:]}")
+            mention_id, err = user_send(token, group_id, f"Copilot {text[1:]}")
+            # GroupMe won't push Copilot's reply to our webhook, so poll for it and echo it to SMS users.
+            schedule_copilot_echo(token, group_id, bot_id, mention_id)
+            result = err
     # Admin commands, only for the configured admin.
     elif sender_id and sender_id == ADMIN_UID and ADMIN_TOKEN:
         result = handle_admin(text, group_id)
 
-    # Utility commands are available to everyone.
+    # Commands available to everyone (utilities and -list).
     if result is None:
-        result = handle_command(text)
+        result = handle_command(text, group_id)
 
     if result and bot_id:
         bot_send(bot_id, result)

@@ -17,6 +17,7 @@ Commands are not case-sensitive. `[bracketed]` parts are values you supply; wher
 | Command | What it does | Example |
 | --- | --- | --- |
 | `-help` | List all commands | `-help` |
+| `-list` | Plain roster of the current group (nicknames with admin/muted tags) | `-list` |
 | `-weather [city or zip]` | 7-day forecast (defaults to Jerusalem) | `-weather Chicago` |
 | `-weather hour [city or zip]` | Hourly forecast for today | `-weather hour 10001` |
 | `-zmanim [city or zip]` | Today and tomorrow's halachic times | `-zmanim Lakewood` |
@@ -35,19 +36,19 @@ GroupMe has a built-in assistant called Copilot that only replies when it's @men
 + tell me a joke
 ```
 
-Copilot's reply posts in the group and reaches SMS members the same as any other message. The token used for this is covered under [How the `+` Copilot feature works](#how-the--copilot-feature-works).
+GroupMe recently stopped delivering Copilot's replies to SMS members as text — they now see only a "Copilot sent a message. View it here: <link>" placeholder — and it doesn't deliver Copilot's messages to bot callbacks either, so the bot can't just forward them. Instead, after mentioning Copilot the bot briefly polls the group for the reply (it lands a few seconds later) and reposts it as the bot, so SMS members get the actual text. In-app members see it twice (Copilot's own message plus the echo); only SMS members need the echo. The token used for the mention is covered under [How the `+` Copilot feature works](#how-the--copilot-feature-works).
 
 ### Admin commands
 
-These wrap actions that are awkward or impossible over SMS. They only work for the configured admin, and require `GROUPME_TOKEN` and a matching `ADMIN_UID`. In each command, a group of `.` means the current group.
+These wrap actions that are awkward or impossible over SMS. They only work for the configured admin, and require `GROUPME_TOKEN` and a matching `ADMIN_UID`. For `-add`, `-remove`, and `-members` the group is the **last** argument and defaults to the current group; `.` also means the current group. Because names can contain spaces, a multi-word name/nickname must be followed by an explicit trailing group (`.` for the current one).
 
 | Command | What it does |
 | --- | --- |
 | `-@ <group id or .> <name> [message]` | @mention a member by nickname (or `all`) in any of your groups |
-| `-add <group id or .> <nickname> <phone>` | Add a member by phone number |
-| `-remove <group id or .> <name or id>` | Remove a member |
+| `-add <nickname> <phone> [group id or .]` | Add a member by phone number |
+| `-remove <name or id> [group id or .]` | Remove a member |
 | `-groups` | List your groups and their IDs |
-| `-members <name / phone / id>` | List a group's members, with user and message IDs |
+| `-members [name / phone / id]` | Detailed member list with user and message IDs (defaults to the current group). For a lightweight roster anyone can pull, see `-list`. |
 | `--help` | Show the admin command list |
 
 Admin command output and any errors are sent back to the group the command came from.
