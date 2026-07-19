@@ -1,4 +1,5 @@
 import os
+import textwrap
 import json
 import time
 import threading
@@ -68,8 +69,8 @@ def bot_send(bot_id, message):
     """Post a message to a group as the bot."""
     if not bot_id or not message:
         return
-    requests.post("https://api.groupme.com/v3/bots/post",
-                  json={"bot_id": bot_id, "text": message})
+    for part in textwrap.wrap(message, width=440):
+        requests.post("https://api.groupme.com/v3/bots/post", json={"bot_id": bot_id, "text": part})
 
 
 # GroupMe doesn't deliver Copilot's messages to bot callbacks, so after mentioning Copilot we poll the group for its reply (~2-3s later) and echo it via the bot, so SMS users see the text. In-app users see it twice.
