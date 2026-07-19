@@ -82,6 +82,7 @@ cp config.example.json config.json
 
 ```json
 {
+    "bot_name_length": 3,
     "012345678": "0123456789abcdef0123456789",
     "087654321": "fedcba9876543210fedcba9876"
 }
@@ -89,7 +90,7 @@ cp config.example.json config.json
 
 To get these, create a bot at <https://dev.groupme.com/bots>:
 
-1. Click Create Bot, choose the group it should live in, and give it a name.
+1. Click Create Bot, choose the group it should live in, and give it a short name (3 characters or fewer is ideal — see [SMS message splitting](#sms-message-splitting) for why).
 2. Set its Callback URL to your deployed app, e.g. `https://yourname.pythonanywhere.com/`.
 3. Copy the Bot ID and Group ID shown on the page into `config.json`.
 
@@ -176,6 +177,10 @@ gunicorn -w 2 -b 127.0.0.1:5000 main:app
 ```
 
 Put it behind a reverse proxy that terminates HTTPS, such as [Caddy](https://caddyserver.com/) or nginx with Let's Encrypt, and point the bot's callback URL at `https://yourdomain/`. Run gunicorn under systemd or a process manager so it stays up.
+
+## SMS message splitting
+
+GroupMe truncates long bot messages for SMS users — anything over 3 SMS segments gets cut off with a link. The bot pre-splits messages into individual SMS-sized pieces so nothing is lost. It calculates the real SMS weight of each message using the GSM-7 encoding standard (where certain characters like `[]{}~|\^€` count double), splits on word boundaries, and appends a compact `1/3`-style indicator when a message has multiple parts. Characters outside the GSM-7 alphabet that would otherwise downgrade the entire message to UCS-2 (70 chars/segment instead of 160) are replaced with `?`, unless the message is predominantly non-GSM (e.g. Hebrew) in which case it stays in UCS-2. The overhead reserved per segment accounts for the bot's display name, the `": "` prefix GroupMe adds, and the part indicator. The default `bot_name_length` of 3 in `config.json` reserves space for a 3-character bot name; if your bot name is longer, increase it to match.
 
 ## License
 

@@ -5,3 +5,4 @@ yfinance
 deep-translator
 pyspellchecker
 gunicorn
+smsutil

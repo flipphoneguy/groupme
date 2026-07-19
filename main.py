@@ -1,9 +1,10 @@
 import os
-import textwrap
 import json
 import time
 import threading
 from datetime import datetime
+
+import smsutil
 
 import requests
 from flask import Flask, request
@@ -25,13 +26,16 @@ COPILOT_UID = "128934125"
 # Tokens tried in order for read-only lookups (e.g. -list), since not every account is in every group.
 READ_TOKENS = [t for t in (ADMIN_TOKEN, FALLBACK_TOKEN) if t]
 
-# group_id -> bot_id, loaded from config.json (see config.example.json)
+# group_id -> bot_id and settings, loaded from config.json (see config.example.json)
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 try:
     with open(CONFIG_PATH) as f:
-        BOT_MAP = json.load(f)
+        _CONFIG = json.load(f)
 except (FileNotFoundError, json.JSONDecodeError):
-    BOT_MAP = {}
+    _CONFIG = {}
+BOT_NAME_LENGTH = _CONFIG.pop("bot_name_length", 3)
+BOT_MAP = _CONFIG
+SMS_RESERVE = 8 + BOT_NAME_LENGTH
 
 HELP = """
 commands are not case-sensitive.
@@ -65,11 +69,60 @@ ADMIN_HELP = (
 app = Flask(__name__)
 
 
+def _gsm_sanitize(message):
+    if smsutil.is_valid_gsm(message):
+        return message, True
+    sanitized = ''.join(c if smsutil.is_valid_gsm(c) else '?' for c in message)
+    non_gsm = sum(1 for c in message if not smsutil.is_valid_gsm(c))
+    if non_gsm * 5 <= len(message):
+        return sanitized, True
+    return message, False
+
+
+def _sms_split(message):
+    message, gsm = _gsm_sanitize(message)
+    budget = 160 if gsm else 70
+    limit = budget - SMS_RESERVE
+    ext = set(smsutil.GSM_EXT_CHARSET)
+
+    def char_w(c):
+        if gsm:
+            return 2 if c in ext else 1
+        return 2 if ord(c) > 0xFFFF else 1
+
+    parts = []
+    i = 0
+    while i < len(message):
+        w = 0
+        end = i
+        last_ws = None
+        while end < len(message):
+            cw = char_w(message[end])
+            if w + cw > limit:
+                break
+            w += cw
+            if message[end] in ' \t\n':
+                last_ws = end
+            end += 1
+        if end >= len(message):
+            parts.append(message[i:end])
+            break
+        if last_ws is not None and last_ws > i:
+            parts.append(message[i:last_ws])
+            i = last_ws + 1
+        else:
+            parts.append(message[i:end])
+            i = end
+    if len(parts) > 1:
+        n = len(parts)
+        parts = [f"{p} {j+1}/{n}" for j, p in enumerate(parts)]
+    return parts
+
+
 def bot_send(bot_id, message):
-    """Post a message to a group as the bot."""
     if not bot_id or not message:
         return
-    for part in textwrap.wrap(message, width=440):
+    for part in _sms_split(message):
         requests.post("https://api.groupme.com/v3/bots/post", json={"bot_id": bot_id, "text": part})
 
 
